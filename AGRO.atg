@@ -1,15 +1,533 @@
 using System;
+using Newtonsoft.Json;
+using System.Linq;
 using AGRO_GRAMM;
+using System.Collections.Generic;
+
 
 COMPILER PROGRAM
 
 const int // types
-	  undef = 0, t_int = 1, t_float = 2, t_char = 3, t_void = 4 ,t_obj = 5;
+	  invalid = Int32.MaxValue, undef = 0, t_int = 1, t_float = 2, t_char = 3, t_void = 4 ,t_obj = 5, t_string = 6;
 
 const int // object kinds
-	  var = 0, func = 1;
+	  var = 0, func = 1, temporal = 2, pointer = 3, constant = 4, array = 5;
 
-SymbolTable   sTable;
+
+int[] TERM_OPERATORS = { _mul, _div, _exponent, _intdiv, _module};
+int[] EXP_OPERATORS = { _add, _sub };
+int[] RELEXP_OPERATORS = { _and, _or };
+int[] RELOP_OPERATORS = { _greater, _less, _greatereq, _lesseq, _equaleq, _different };
+
+//extra tokens for Quads
+public const int _print=66;
+public const int _input=67;
+public const int _goto=68;
+public const int _gotoFalse=69;
+public const int _gotoTrue=70;
+
+Dictionary<int, string> operandInts = JsonConvert.DeserializeObject<Dictionary<int, string>>(@$"{{
+				{_add}:'+',
+				{_sub}:'-',
+				{_div}:'/',
+				{_exponent}:'**',
+                {_intdiv}:'//',
+				{_mul}:'*',
+                {_module}:'%',
+				{_sadd}:'+=',
+				{_ssub}:'-=',
+				{_sdiv}:'/=',
+				{_smul}:'*=',
+				{_increment}: '++',
+				{_decrement}: '--',
+				{_less}:'<',
+				{_lesseq}:'<=',
+				{_greater}:'>',
+				{_greatereq}:'>=',
+				{_equaleq}:'==',
+				{_equal}:'=',
+				{_different}:'!=',
+				{_and}:'&&',
+				{_or}:'||',
+                {_print}: 'print',
+                {_input}: 'input',
+                {_goto}: 'goto',
+                {_gotoFalse}: 'gotoFalse',
+                {_gotoTrue}: 'gotoTrue'
+				}}");
+
+Dictionary<int, string> typesInts = JsonConvert.DeserializeObject<Dictionary<int, string>>(@$"{{
+				{invalid}: 'INVALID',
+                {undef}:'UNDEFINED',
+				{t_int}:'INT',
+				{t_float}:'FLOAT',
+				{t_char}:'CHAR',
+				{t_void}:'VOID',
+				{t_obj}:'OBJ',
+				{t_string}:'STRING'
+				}}");
+
+public SymbolTable   sTable;
+public SymbolTable   globalSymbolTable;
+public SymbolTable   mainSymbolTable;
+public Dictionary<string, Function> dirFunc   = new Dictionary<string, Function>();
+public Dictionary<string, Classes> dirClasses = new Dictionary<string, Classes>();
+
+Stack<String> stackOperand = new Stack<String>();
+Stack<int>   stackOperator = new Stack<int>();
+Stack<int>      stackTypes = new Stack<int>();
+Stack<int>      stackJumps = new Stack<int>();
+
+int tempCont = 0;
+
+public List<Actions> program = new List<Actions>();
+
+void pushToOperandStack(string id, SymbolTable st){
+    int typeId = invalid;
+    if(validateOper(id,st)){
+        // In order to push to the stack, we need to know the type of the id
+        typeId = st.getType(id);
+    }
+    // Push the id
+    stackOperand.Push(id);
+    // Push the type
+    stackTypes.Push(typeId);
+
+}
+
+string createTemp(int type, SymbolTable st){
+    string tempName;
+    tempName = "_t" + tempCont;
+    tempCont+=1;
+    //putSymbol(string name, int type, int kind, int dim1, int dim2, int access)
+    st.putSymbol(tempName, type, temporal, 0, 0, 1);
+    return tempName;
+}
+
+string createTempInt(int tempp, SymbolTable st){
+    string tempName;
+    tempName = "_t" + tempCont;
+    tempCont+=1;
+    st.putSymbol(tempName, t_int, temporal, 0, 0, 1);
+    return tempName;
+}
+
+string createConstInt(int value, SymbolTable st){
+    string constName;
+    constName = "_" + value;
+    st.putConstantInt(constName, t_int, constant, value);
+    return constName;
+}
+
+string createConstFloat(float value, SymbolTable st){
+    string constName;
+    constName = "_" + value;
+    st.putConstantFloat(constName, t_float, constant, value);
+    return constName;
+}
+
+string createConstString(string value, SymbolTable st){
+    string constName;
+    constName = "_" + value;
+    st.putConstantString(constName, t_string, constant, value);
+    return constName;
+}
+
+string createConstChar(char value, SymbolTable st){
+    string constName;
+    constName = "_" + value;
+    st.putConstantChar(constName, t_char, constant, value);
+    return constName;
+}
+
+string createTempFloat(float tempp, SymbolTable st){
+    string tempName;
+    tempName = "_t" + tempCont;
+    tempCont+=1;
+    //putSymbol(string name, int type, int kind, int dim1, int dim2, int access)
+    st.putSymbol(tempName, t_float, temporal, 0, 0, 1);
+    return tempName;
+}
+
+bool validateOper(string oper, SymbolTable st){
+    return (st.getSymbol(oper) != null);
+}
+
+void checkReturn(SymbolTable st, string leftOper, string rightOper) {
+    Cuadruple quad = new Cuadruple(_equal, leftOper, rightOper, leftOper, st, operandInts);
+
+    // Check if cube operator is valid for these operands
+    if (quad.typeOut == invalid)
+    {
+        SemErr("Return type mismatch: Expected <" + typesInts[st.getType(leftOper)] + ">. Found <" + typesInts[st.getType(rightOper)] + ">");
+    }
+    //program.Add(quad);
+}
+
+void checkAssign(SymbolTable st) {
+    string leftOper;
+    string rightOper;
+    int leftType;
+    int rightType;
+    int operat;
+
+    if(stackOperator.Count > 0) {
+        // Get the data to create the quad
+        rightType = stackTypes.Pop();
+        rightOper = stackOperand.Pop();
+        if(rightType == invalid){
+            SemErr("Invalid assignment: " + rightOper + " not declared.");
+            return;
+        }
+
+        if (stackOperand.Count > 0) {
+            leftType = stackTypes.Pop();
+            leftOper = stackOperand.Pop();
+            if(leftType == invalid){
+                SemErr("Invalid assignment: " + leftOper + " not declared.");
+                return;
+            }
+        }
+        else {
+            leftType = rightType;
+            leftOper = rightOper;
+        }
+        
+        operat = stackOperator.Pop();
+        
+        Assign assign = new Assign(operat, rightOper, leftOper, st, operandInts);
+
+        // Check if cube operator is valid for these operands
+        if (assign.typeOut == invalid)
+        {
+            SemErr("Invalid assignment: " + typesInts[leftType] + " " + operandInts[operat] + " " + typesInts[rightType]);
+        }
+        assign.setDirOut(st, leftOper);
+        program.Add(assign);
+    }
+}
+
+void check(SymbolTable st, int[] arr){
+    string leftOper;
+    string rightOper;
+    int leftType;
+    int rightType;
+    int operat;
+    string tempName;
+    if(stackOperator.Count > 0){
+        if(Array.Exists(arr, s => s.Equals(stackOperator.Peek()) )){
+            // Get the data to create the quad
+            rightType = stackTypes.Pop();
+            rightOper = stackOperand.Pop();
+            if(rightType == invalid){
+                SemErr("Operand: " + rightOper + " not declared");
+                return;
+            }
+            leftType = stackTypes.Pop();
+            leftOper = stackOperand.Pop();
+            if(leftType == invalid){
+                SemErr("Operand: " + leftOper + " not declared");
+                return;
+            }
+            operat = stackOperator.Pop();
+            // Create the temporal variable
+            tempName = "_t" + tempCont;
+            tempCont+=1;
+            Cuadruple quad = new Cuadruple(operat, leftOper, rightOper, tempName, st, operandInts);
+
+            // Check if cube operator is valid for these operands
+            if (quad.typeOut == invalid)
+            {
+                SemErr("Invalid operation: " + typesInts[leftType] + " " + operandInts[operat] + " " + typesInts[rightType]);
+            }
+            //putSymbol(string name, int type, int kind, int dim1, int dim2, int access)
+            st.putSymbol(tempName, quad.typeOut, temporal, 0, 0, 1);
+            quad.setDirOut(st, tempName);
+            program.Add(quad);
+            pushToOperandStack(tempName, st);
+        }
+    }
+}
+
+void checkInputOutput(SymbolTable st, int oper){
+    string operand;
+    int type;
+    type = stackTypes.Pop();
+    operand = stackOperand.Pop();
+    if(type == invalid){
+        SemErr("Variable: " + operand + " not declared");
+        return;
+    }
+    InOut quad = new InOut(oper, operand, st, operandInts);
+    quad.setDirOut(st, operand);
+    program.Add(quad);
+}
+
+int checkArray(SymbolTable st, string name){
+    int sizeDim = -1;
+    stackOperand.Pop();
+    stackTypes.Pop();
+    int[] symbol = st.getSymbol(name);
+    //id: [type, kind, dir, dim1?0, dim2?0, access:[-1|1]]
+
+    int varDims = symbol[3] != 0 ? symbol[4] != 0 ? 2 : 1 : 0;
+    if(1 > varDims){
+        SemErr("Variable " + name + " has " + varDims + " dimension, asked for 1");
+    }else{
+        sizeDim = symbol[3];
+    }
+    stackOperator.Push(_pl);
+    return sizeDim;
+}
+
+int checkMatrix(SymbolTable st, string name){
+    int sizeDim = -1;
+    int[] symbol = st.getSymbol(name);
+    int varDims = symbol[3] != 0 ? symbol[4] != 0 ? 2 : 1 : 0;
+    if(2 > varDims){
+        SemErr("Variable " + name + " has " + varDims + " dimension, asked for 2");
+    }else{
+        sizeDim = symbol[4];
+    }
+    return sizeDim;
+}
+
+void verifyLimit(SymbolTable st, string name, int sizeDim){
+
+    // Verify S1 type is int
+    if (stackTypes.Peek() != t_int) {
+        SemErr("Int expected for array index");
+    }
+
+    string aux;
+    string tempName,tempName1;
+    string dim2;
+
+    string pos = stackOperand.Peek(); // S1
+    Verify ver = new Verify(pos, sizeDim-1, st);
+    program.Add(ver);
+    int[] symbol = st.getSymbol(name);
+    //id: [type, kind, dir, dim1?0, dim2?0, access:[-1|1]]
+    if(symbol[4] > 0){
+        // We have 2 dims
+        aux = stackOperand.Pop();  //Result of expression
+        dim2 = createConstInt(symbol[4],st);
+        tempName1 = "_t" + tempCont;
+        tempCont+=1;
+        Cuadruple quad = new Cuadruple(_add, aux, createConstInt(1,st), tempName1, st, operandInts); //We need to add 1 to the S1 value to get the right dim
+        st.putSymbol(tempName1, quad.typeOut, temporal, 0, 0, 1);
+        quad.setDirOut(st, tempName1);
+        program.Add(quad);
+        tempName = "_t" + tempCont;
+        tempCont+=1;
+        Cuadruple quad1 = new Cuadruple(_mul,tempName1,dim2,tempName, st, operandInts);   // (S1+1) * Dim2
+        st.putSymbol(tempName, quad.typeOut, temporal, 0, 0, 1);
+        quad1.setDirOut(st, tempName);
+        program.Add(quad1);
+        pushToOperandStack(tempName, st);                                       //Top of operand is ^
+    }
+}
+
+void verifyLimit2(SymbolTable st, string name, int sizeDim){
+    // Verify S2 type is int
+    if (stackTypes.Peek() != t_int) {
+        SemErr("Int expected for array index");
+    }
+
+    string tempName, tempName1, dim2;
+
+    if(sizeDim == -1){
+        return;
+    }
+
+    string pos = stackOperand.Peek(); // S2
+    Verify ver = new Verify(pos, sizeDim-1, st);
+    program.Add(ver);
+    
+    string aux2 = stackOperand.Pop();       //S2
+    string aux1 = stackOperand.Pop();       //(S1+1) * Dim2
+    tempName = "_t" + tempCont;
+    tempCont+=1;
+    Cuadruple quad = new Cuadruple(_add,aux2,aux1,tempName, st, operandInts);   // (S1+1) * Dim2 + S2
+    st.putSymbol(tempName, quad.typeOut, temporal, 0, 0, 1);
+    quad.setDirOut(st, tempName);
+    program.Add(quad);
+    tempName1 = "_t" + tempCont;
+    tempCont+=1;
+
+    //Create D2
+    int[] symbol = st.getSymbol(name);
+    dim2 = createConstInt(symbol[4],st);
+
+    Cuadruple quad1 = new Cuadruple(_sub,tempName,dim2,tempName1, st, operandInts);   // (S1+1) * Dim2 + S2 - Dim2
+    st.putSymbol(tempName1, quad.typeOut, temporal, 0, 0, 1);
+    quad1.setDirOut(st, tempName1);
+    program.Add(quad1);
+
+    pushToOperandStack(tempName1, st);                                       //Top of operand is (S1+1) * Dim2 + S2 - Dim2
+}
+
+void endArray(SymbolTable st, string name){
+    string auxEnd;
+    string tempDir,tempName;
+    auxEnd =  stackOperand.Pop();
+
+    tempDir = createConstInt(st.getDir(name),st);
+    tempName = "_t" + tempCont;
+    tempCont+=1;
+    Cuadruple quad = new Cuadruple(_add,tempDir,auxEnd,tempName, st, operandInts);   // DimBase + res
+    st.putSymbol(tempName, quad.typeOut, pointer, 0, 0, 1);
+    quad.setDirOut(st, tempName);
+    program.Add(quad);
+    pushToOperandStack(tempName, st);
+    stackOperator.Pop();
+}
+
+void makeIf(SymbolTable st){
+    string cond;
+    int typeCond;
+
+    typeCond = stackTypes.Pop();
+    cond = stackOperand.Pop();
+    Goto GotoIf = new Goto(_gotoFalse, cond, st, operandInts);
+    program.Add(GotoIf);
+    stackJumps.Push(program.Count-1);
+}
+
+void makeIfEnd(){
+    int endIf = stackJumps.Pop();
+	Goto endJump = (Goto)program[endIf];
+	endJump.setDirection(program.Count);
+}
+
+void makeElse(SymbolTable st){
+    int falseIfIndex = stackJumps.Pop();
+    Goto GotoEnd = new Goto(_goto, "", st, operandInts);
+    program.Add(GotoEnd);
+    stackJumps.Push(program.Count-1);
+    Goto falseIf = (Goto)program[falseIfIndex];
+    falseIf.setDirection(program.Count);
+}
+
+void makeLoop(SymbolTable st){
+    string cond;
+    int typeCond;
+
+    typeCond = stackTypes.Pop();
+    cond = stackOperand.Pop();
+    Goto GotoWhile = new Goto(_gotoFalse, cond, st, operandInts);
+    program.Add(GotoWhile);
+    stackJumps.Push(program.Count-1);
+}
+
+void makeLoopEnd(SymbolTable st){
+    int endWhile = stackJumps.Pop();
+    int retEval = stackJumps.Pop();
+	Goto evalJump = new Goto(_goto, "", st, operandInts);
+    evalJump.setDirection(retEval);
+    program.Add(evalJump);
+    Goto gotoEndWhile = (Goto)program[endWhile];
+	gotoEndWhile.setDirection(program.Count);
+}
+
+void makeFor(SymbolTable st){
+    string cond;
+    int typeCond;
+
+    typeCond = stackTypes.Pop();
+    cond = stackOperand.Pop();
+    Goto GotoFalse = new Goto(_gotoFalse, cond, st, operandInts);
+    program.Add(GotoFalse);
+    stackJumps.Push(program.Count-1);
+    Goto gotoTrue = new Goto(_goto, "", st, operandInts);
+    program.Add(gotoTrue);
+    stackJumps.Push(program.Count-1);
+}
+
+void forTrue(SymbolTable st){
+    Goto gotoEval = new Goto(_goto, "", st, operandInts);
+    program.Add(gotoEval);
+    stackJumps.Push(program.Count-1);
+}
+
+void makeForEnd(SymbolTable st){
+    int setGotoEval = stackJumps.Pop();
+    int gotoBlockTrue = stackJumps.Pop();
+    int gotoEnd = stackJumps.Pop();
+    int retEval = stackJumps.Pop();
+    Goto _gotoEnd = (Goto)program[gotoEnd];
+    _gotoEnd.setDirection(program.Count+1);
+	Goto gotoStep = new Goto(_goto, "", st, operandInts);
+    gotoStep.setDirection(gotoBlockTrue+1);
+    Goto _setGotoEval = (Goto)program[setGotoEval];
+    _setGotoEval.setDirection(retEval);
+    Goto _gotoBlockTrue = (Goto)program[gotoBlockTrue];
+    _gotoBlockTrue.setDirection(setGotoEval+1);
+    program.Add(gotoStep);
+    
+}
+
+void checkClassCreation(string className){
+    if(dirClasses.ContainsKey(className)){
+        SemErr("Class <" + className + "> is already declared.");
+        return;
+    }
+    dirClasses.Add(className, new Classes(program.Count + 1));
+}
+
+void addParentClass(string childClass, string parentClass, SymbolTable st){
+    if(!dirClasses.ContainsKey(parentClass)){
+        SemErr("Parent class <" + parentClass + "> is not declared.");
+        return;
+    }
+
+    dirClasses[childClass].setParentClass(dirClasses[parentClass]);
+    //Copy to STABLE dirClasses[parentClass]
+    foreach (string key in dirClasses[parentClass].symbolsClass.Keys)
+    {
+        //putSymbol(string name,    int type,   int kind,   int dim1,   int dim2,   int access)
+        st.putSymbol(key, dirClasses[parentClass].symbolsClass[key][0], dirClasses[parentClass].symbolsClass[key][1], dirClasses[parentClass].symbolsClass[key][3], dirClasses[parentClass].symbolsClass[key][4], dirClasses[parentClass].symbolsClass[key][5]);
+        if(dirClasses[parentClass].symbolsClass[key][1] == func){
+            dirFunc[childClass+"."+key] = dirFunc[parentClass+"."+key];
+        }
+    }
+}
+
+void validateObject(string className){
+    if(!dirClasses.ContainsKey(className)){
+        SemErr("Object class <" + className + "> is not declared.");
+        return;
+    }
+}
+
+void createObject(string objName, string className, SymbolTable st){
+    st.putObject(objName, dirClasses[className]);
+    st.objectClasses[objName] = className;
+}
+
+void checkAttAccess(string attName, SymbolTable st){
+    if(st.getAccess(attName) != -1){
+        pushToOperandStack(attName, sTable);
+    }else{
+        SemErr("Trying to acces private symbol: <"+ attName + ">.");
+        stackTypes.Push(invalid);
+        stackOperand.Push(attName);
+    }
+}
+
+void checkMethodCall(string objectName, string methodName, SymbolTable st){
+    //Get all local directions of object attributes
+    string className = st.objectClasses[objectName];
+    Dictionary <string, int> objectVars = st.objects[objectName];
+    int paramCount = 0;
+    foreach (string varname in objectVars.Keys){
+        if(objectVars[varname]!= 0)
+        {
+            new Param("object",objectName+"."+varname, paramCount, st, program);
+            paramCount ++;
+        }
+    }
+}
 
 /*--------------------------------------------------------------------------*/    
 
@@ -18,6 +536,24 @@ bool IsFunctionCall(){
     Token x = la; 
     while (x.kind == _id ) 
         x = scanner.Peek();
+    return x.kind == _pl;
+}
+
+bool IsTypedFunctionCall(SymbolTable st){
+    scanner.ResetPeek();
+    Token x = la; 
+    while (x.kind == _id ){
+        if(!validateOper(la.val, st)){
+                break;
+        }
+        else
+        {
+            if(st.getType(la.val) == t_void){
+                SemErr("Invalid function call: " + _id + " does not return any value");
+            }
+            x = scanner.Peek();
+        }
+    }
     return x.kind == _pl;
 }
 
@@ -39,7 +575,7 @@ bool IsTypeFunction() {
 bool IsDecVars(){
     scanner.ResetPeek();
     Token x = scanner.Peek();
-    while (x.kind == _id || x.kind == _comma) 
+    while (x.kind == _id || x.kind == _comma || x.kind == _br || x.kind == _bl || x.kind == _cte_I) 
         x = scanner.Peek();
     return x.kind == _semicolon;
 }
@@ -60,6 +596,7 @@ id			= letter { letter | digit }.
 cte_I		= digit { digit }.
 cte_F		= digit { digit } "." digit { digit }.
 ctr_Str 	= '"' {notQuote} '"'.
+ctr_Chr 	= '\'' notQuote '\''.
 cbl         = "{".
 cbr         = "}".
 bl          = "[".
@@ -71,7 +608,10 @@ semicolon   = ";".
 add         = "+".
 sub         = "-".
 mul         = "*".
+exponent    = "**".
 div         = "/".
+intdiv      = "//".
+module      = "%".
 equal       = "=".
 dot         = ".".
 sadd        = "+=".
@@ -87,6 +627,8 @@ lesseq      = "<=".
 greatereq   = ">=".
 equaleq     = "==".
 different   = "!=".
+and         = "&&".
+or          = "||".
 
 COMMENTS FROM "%%" TO "\r\n"
 
@@ -97,6 +639,8 @@ PRODUCTIONS
 PROGRAM= 
     (.
      sTable = new SymbolTable();
+     globalSymbolTable = sTable; // Save first symboltable here
+     program.Add(new Goto(_goto, "", sTable, operandInts)); // Main GOTO. Always position 0
     .)
     { DECLARATION } MAIN
     
@@ -104,46 +648,83 @@ PROGRAM=
 
 DECLARATION=
     
-    IF( IsTypeFunction() ) DEC_FUNC | DEC_VARS //| DEC_CLASS
+    IF( IsTypeFunction() ) DEC_FUNC <""> | DEC_VARS <1> | DEC_CLASS
 .
 
-DEC_VARS                                    (. string name; int type; string className; .)
+DEC_VARS  <int access>               (. string name; int type; string className; int dim1=0; int dim2=0;.)
 =
-    ( IDENT		    < out className >
-    IDENT                   < out name >    (. sTable.putSymbol(name, t_obj, var); .)
-    { comma IDENT           < out name >    (. sTable.putSymbol(name, t_obj, var); .)   
+    ( IDENT		            < out className >  (. validateObject(className); .)
+    IDENT                   < out name >    (. if (!sTable.putSymbol(name, t_obj, var, 0, 0, 1)) { SemErr(name + " already exists"); }  createObject(name, className, sTable); .)
+    { comma IDENT           < out name >    (. if (!sTable.putSymbol(name, t_obj, var, 0, 0, 1)) { SemErr(name + " already exists"); }  createObject(name, className, sTable); .)   
     } semicolon ) |
     ( 
      SIMPLE_TYPE            < out type >
-     IDENT                  < out name >    (. sTable.putSymbol(name, type, var); .)
-     [ bl cte_I br [ bl cte_I br ] ] 
-     { comma IDENT         < out name >     (. sTable.putSymbol(name, type, var); .)
-     [ bl cte_I br [ bl cte_I br ] ] } 
+     IDENT                  < out name >    
+     [ bl cte_I (. dim1 = Int32.Parse(t.val); .) br 
+        [ bl cte_I (. dim2 = Int32.Parse(t.val); .) br ] ]        
+        (.
+        if(dim1>0){
+            sTable.putSymbolArray(name, type, var, dim1, dim2, 1);
+            dim1 = 0;
+            dim2 = 0;
+        }
+        else
+            if (!sTable.putSymbol(name, type, var, 0, 0, access)) { SemErr(name + " already exists"); }
+        .)
+     { 
+     comma IDENT         < out name >     
+     [ bl cte_I (. dim1 = Int32.Parse(t.val); .) br 
+        [ bl cte_I (. dim2 = Int32.Parse(t.val); .) br ] ]
+        (.
+        if(dim1>0){
+            sTable.putSymbolArray(name, type, var, dim1, dim2, 1);
+            dim1 = 0;
+            dim2 = 0;
+        }
+        else
+            if (!sTable.putSymbol(name, type, var, 0, 0, access)) { SemErr(name + " already exists"); }
+        .)
+     } 
      semicolon 
     )
 .
 
-DEC_FUNC				(. string name; int type; .)
+DEC_FUNC  <string className>	       (. string name; int type; bool solvedReturn; string returnVar; .)
 =				
-    TYPE_FUNC			< out type >
-    IDENT			< out name > (. sTable.putSymbol(name, type, func);
-                                    sTable = sTable.newChildSymbolTable(); .)
-    pl [ PARAMS_FUNC ] pr
+    TYPE_FUNC		< out type > (. solvedReturn = (type == t_void); .)
+    IDENT			< out name > (. if(!sTable.putSymbol(name, type, func, 0, 0, 1)) { SemErr(name + " already exists"); }
+                                    dirFunc.Add(className+name, new Function(program.Count));
+                                    if (className.Length == 0) { if(!sTable.putSymbol("_" + name, type, var, 0, 0, 1)) { SemErr(name + " already exists"); } }
+                                    else { sTable.putSymbol("_" + type, type, var, 0, 0, 1); }
+                                    sTable = sTable.newChildSymbolTable();
+                                    if (className.Length != 0) { sTable.updateLocalOffsetsFromParent(); } .)
+    pl [ PARAMS_FUNC <className+name> ] pr
     cbl [
-     ( IF( IsDecVars() ) DEC_VARS |
-      STATUTE ) 
-      { ( IF( IsDecVars() ) DEC_VARS |
-       STATUTE ) } ] 
-     [ RETURN ] 
-    cbr					(. sTable = sTable.parentSymbolTable; .)
-.
-/*
-DEC_CLASS=
-    "class" IDENT
-    [ colon IDENT ] 
-    cbl { CLASS_DEF } cbr
+     ( IF( IsDecVars() ) DEC_VARS <1> |
+      STATUTE) 
+      { ( IF( IsDecVars() ) DEC_VARS <1> |
+       STATUTE 
+       ) } ] 
+       [ RETURN <(className.Length == 0) ? name : ""+type, out returnVar> (. solvedReturn = true; checkReturn(sTable, (className.Length == 0) ? ("_" + name) : ("_" + type), returnVar); .) ]
+     (. if (!solvedReturn) { SemErr("Function requires return"); } .)
+    cbr					(. dirFunc[className+name].countVars(sTable);
+                           if (className.Length != 0  && false) { sTable.updateLocalOffsetsToParent(); }
+                           sTable = sTable.parentSymbolTable;
+                           program.Add(new EndFunc()); .)
 .
 
+DEC_CLASS         (. string className; string parentClassName;.)
+=
+    "class" IDENT  < out className >            (. checkClassCreation(className); .)
+    (. sTable = sTable.newChildSymbolTable(); .)
+    [ colon IDENT  < out parentClassName >      (. addParentClass(className, parentClassName, sTable); .)] 
+    cbl { CLASS_DEF < className > } cbr
+    (. 
+    dirClasses[className].setClassVars(sTable);
+    sTable = sTable.parentSymbolTable; 
+    .)
+.
+/*
 COMPOUND_TYPE  < out int typeObj >  (. string type; .) 
 =
     IDENT       < out type >	(. typeObj = t_obj; .)
@@ -154,20 +735,22 @@ SIMPLE_TYPE         < out int type >
     (
     "int"           (. type = t_int; .)   |
     "float"         (. type = t_float; .) |
-    "char"          (. type = t_char; .)
+    "char"          (. type = t_char; .)  |
+    "string"        (. type = t_string; .)
     )
 .
 
-MAIN=               (. sTable = sTable.newChildSymbolTable(); .)
-    "main" cbl ( IF( IsDecVars() ) DEC_VARS | STATUTE ) { IF( IsDecVars() ) DEC_VARS | STATUTE } cbr
-                    (. sTable = sTable.parentSymbolTable; .)
+MAIN=               (. sTable = sTable.newChildSymbolTable(); Goto mainGoto = (Goto)program[0]; mainGoto.setDirection(program.Count); .)
+    "main" cbl ( IF( IsDecVars() ) DEC_VARS <1> | STATUTE ) { IF( IsDecVars() ) DEC_VARS <1> | STATUTE } cbr
+                    (. mainSymbolTable = sTable; 
+                    sTable = sTable.parentSymbolTable; .)
 .
 
 STATUTE=
     INPUT       |
     PRINT       |
-    IF( IsFunctionCall() ) FUNC_CALL  |
- //   IF( IsMethodCall() ) METHOD_CALL  |
+    IF( IsFunctionCall() ) FUNC_CALL  semicolon|
+    IF( IsMethodCall() ) METHOD_CALL  semicolon|
     CONDITIONAL |
     WHILE       |
     FOR         |
@@ -184,114 +767,255 @@ TYPE_FUNC           < out int type >
     )
 .
 
-PARAMS_FUNC             		(. string name; int type; .)
+PARAMS_FUNC < string currFunc >             		(. string name; int type; .)
 =
     SIMPLE_TYPE         < out type >
-    IDENT		< out name >	(. sTable.putSymbol(name, type, var); .)
+    IDENT		< out name >	(. if (!sTable.putSymbol(name, type, var, 0, 0, 1)) { SemErr(name + " already exists"); }
+                                   dirFunc[currFunc].parameterTypes.Add(type); .)
     { 
      comma SIMPLE_TYPE	< out type >
-     IDENT		< out name >	(. sTable.putSymbol(name, type, var); .)
+     IDENT		< out name >	(. if (!sTable.putSymbol(name, type, var, 0, 0, 1)) { SemErr(name + " already exists"); }
+                                   dirFunc[currFunc].parameterTypes.Add(type); .)
     }
 .
 
-RETURN=
-    "return" EXP semicolon
+RETURN <string funcName, out string returnVar >
+=
+    "return" HYPER_EXP semicolon (. returnVar = stackOperand.Peek(); program.Add(new Return(stackOperand.Pop(), sTable.getDir("_"+funcName), sTable)); .)
 .
 
 EXP=
-    TERM { (add | sub) TERM }
+    TERM                    
+    { (add (. stackOperator.Push(_add); .) | sub (. stackOperator.Push(_sub);.) ) TERM (. check(sTable, EXP_OPERATORS); .)}
+    (. check(sTable, EXP_OPERATORS); .)
 .
-/*
-CLASS_DEF=
-    ( "+" | "-" ) ( IF( IsTypeFunction() ) DEC_FUNC | DEC_VARS )
+
+CLASS_DEF <string className>   (. int access = 1; .)
+=
+    ( "+" (. access = 1; .)| "-" (. access = -1; .)) 
+    ( 
+    IF( IsTypeFunction() ) DEC_FUNC < className+"." >  |
+    DEC_VARS <access>
+    )
 .
-*/
+
 ASSIGN=
-    VARIABLE_ASSIGN ( ( ( SHORT_ASSIGN | equal ) EXP ) | STEP ) semicolon
+    VARIABLE_ASSIGN ( ( ( SHORT_ASSIGN | equal (. stackOperator.Push(_equal); .) ) HYPER_EXP ) | STEP ) semicolon (. checkAssign(sTable); .)
 .
 
 INPUT=
-    "input" pl VARIABLE_ASSIGN pr semicolon
+    "input" pl VARIABLE_ASSIGN (. checkInputOutput(sTable, _input); .) pr semicolon
 .
 
 PRINT=
-    "print" pl  EXP { comma EXP } pr semicolon
+    "print" pl 
+    HYPER_EXP (. checkInputOutput(sTable, _print); .) { comma HYPER_EXP (. checkInputOutput(sTable, _print); .) }
+    pr semicolon
 .
 
 CONDITIONAL=
-    "if" pl HYPER_EXP pr BLOCK [ "else" BLOCK ]
+    "if" pl HYPER_EXP (. makeIf(sTable); .) pr BLOCK [ "else" (. makeElse(sTable); .) BLOCK ] (. makeIfEnd(); .)
 .
 
 WHILE=
-    "while" pl HYPER_EXP pr BLOCK
+    "while" pl (. stackJumps.Push(program.Count); .) HYPER_EXP
+    (. makeLoop(sTable); .) pr 
+    BLOCK
+    (. makeLoopEnd(sTable); .)
 .
 
 FOR=
-    "for" pl ASSIGN semicolon HYPER_EXP semicolon ASSIGN pr BLOCK
+    "for" pl ASSIGN
+    (. stackJumps.Push(program.Count); .)
+    HYPER_EXP 
+    (. makeFor(sTable); .)
+    semicolon
+    ASSIGN
+    (. forTrue(sTable); .)
+    pr
+    BLOCK
+    (. makeForEnd(sTable); .)
 .
 
-FUNC_CALL	(. string name; .)
+FUNC_CALL	(. string name; int paramCount = 0; string localParamType; string funcParamType;.)
 =
-    IDENT	< out name > 
-    pl [ EXP { comma EXP } ] pr semicolon
+    IDENT	< out name > (. if (sTable.getSymbol(name) == null) { SemErr("Function does not exists"); }
+                            program.Add(new Era(name)); .)
+    pl [ HYPER_EXP 
+                    (. 
+                        funcParamType = typesInts[dirFunc[name].parameterTypes[paramCount]];
+                        localParamType = typesInts[sTable.getType(stackOperand.Peek())];
+                        if (localParamType  != funcParamType) { 
+                            SemErr("Parameter type mismatch. Expected <" + funcParamType + ">. Found <" + localParamType + ">"); 
+                        } 
+                        new Param("param", stackOperand.Pop(), paramCount, sTable, program); 
+                        paramCount ++; 
+                    .) 
+        { comma HYPER_EXP 
+                    (. 
+                        if(paramCount >= dirFunc[name].parameterTypes.Count){
+                            SemErr("Parameter number mismatch. Expected Just " + dirFunc[name].parameterTypes.Count + " Parameters. Found more");
+                        }else{
+                            funcParamType = typesInts[dirFunc[name].parameterTypes[paramCount]];
+                            localParamType = typesInts[sTable.getType(stackOperand.Peek())];
+                            if (localParamType  != funcParamType) { 
+                                SemErr("Parameter type mismatch. Expected <" + funcParamType + ">. Found <" + localParamType + ">"); 
+                            } 
+                            new Param("param", stackOperand.Pop(), paramCount, sTable, program); 
+                            paramCount ++;
+                        }
+                    .) 
+        } ] pr
+    (.
+        if(paramCount < dirFunc[name].parameterTypes.Count){
+            SemErr("Parameter number mismatch. Expected " + dirFunc[name].parameterTypes.Count + " Parameters. Found " + paramCount + ""); 
+        }
+        program.Add(new GoSub(name)); 
+        // If not void create temp to store result of call
+        if(sTable.getType(name) != t_void){
+            pushToOperandStack(createTemp(sTable.getType(name), sTable), sTable);
+            string leftOper = stackOperand.Peek();
+            Assign assign = new Assign(_equal, "_"+name, leftOper, sTable, operandInts);
+            assign.setDirOut(sTable, leftOper);
+            program.Add(assign);
+        }
+    .)
 .
-/*
-METHOD_CALL=
-    IDENT dot IDENT { dot IDENT } pl [ EXP { comma EXP } ] pr semicolon
+
+METHOD_CALL         (. string name, objectName, methodName, className; int paramCount = 0; string localParamType; string funcParamType;.)
+=
+    IDENT  < out objectName >
+    dot 
+    IDENT  < out methodName >       
+    (.
+        checkMethodCall(objectName, methodName, sTable); 
+        className = sTable.objectClasses[objectName];
+        name = className+"."+methodName;
+    .)
+    /*{ dot IDENT }*/ 
+    pl [ HYPER_EXP 
+    (. 
+        
+        funcParamType = typesInts[dirFunc[name].parameterTypes[paramCount]];
+        localParamType = typesInts[sTable.getType(stackOperand.Peek())];
+        if (localParamType  != funcParamType) { 
+            SemErr("Parameter type mismatch. Expected <" + funcParamType + ">. Found <" + localParamType + ">"); 
+        } 
+        new Param("param", stackOperand.Pop(), paramCount, sTable, program); 
+        paramCount ++; 
+    .)
+    { comma HYPER_EXP 
+    (. 
+        if(paramCount >= dirFunc[name].parameterTypes.Count){
+            SemErr("Parameter number mismatch. Expected Just " + dirFunc[name].parameterTypes.Count + " Parameters. Found more");
+        }else{
+            funcParamType = typesInts[dirFunc[name].parameterTypes[paramCount]];
+            localParamType = typesInts[sTable.getType(stackOperand.Peek())];
+            if (localParamType  != funcParamType) { 
+                SemErr("Parameter type mismatch. Expected <" + funcParamType + ">. Found <" + localParamType + ">"); 
+            } 
+            new Param("param", stackOperand.Pop(), paramCount, sTable, program); 
+            paramCount ++;
+        }
+    .) 
+    } ] pr 
+    (.
+        if(paramCount < dirFunc[name].parameterTypes.Count){
+            SemErr("Parameter number mismatch. Expected " + dirFunc[name].parameterTypes.Count + " Parameters. Found " + paramCount + ""); 
+        }
+        program.Add(new GoSub(name)); 
+        // If not void create temp to store result of call
+        if(sTable.getType(objectName+"."+methodName) != t_void){
+		   pushToOperandStack(createTemp(sTable.getType(objectName + "." + methodName), sTable), sTable);
+		   string leftOper = stackOperand.Peek();
+		   Assign assign = new Assign(_equal, objectName+"._"+ sTable.getType(objectName + "." + methodName), leftOper, sTable, operandInts);
+		   assign.setDirOut(sTable, leftOper);
+		   program.Add(assign);
+		}
+    .)
 .
-*/
+
 TERM=
-    FACT { ( mul | div ) FACT }
+    FACT { OPERATORS_TERM FACT (. check(sTable, TERM_OPERATORS); .) }
+    (. check(sTable, TERM_OPERATORS); .)
 .
 
 SHORT_ASSIGN=
-    sadd | ssub | smul | sdiv
+    sadd (. stackOperator.Push(_sadd); .) | ssub (. stackOperator.Push(_ssub); .) | smul (. stackOperator.Push(_smul); .) | sdiv (. stackOperator.Push(_sdiv); .)
 .
 
-VARIABLE_ASSIGN   (. string name; .)
+VARIABLE_ASSIGN   (. string name; string attrName; int dim1Size=0; int dim2Size=0; string newName;.)
 =
-    IDENT	< out name > 
-    [ /*( dot IDENT { dot IDENT } ) |*/ ( bl EXP br [ bl EXP br ] ) ]
+    IDENT	< out name >            (. pushToOperandStack(name, sTable); newName = name;.)
+    [
+      dot IDENT < out attrName >   (. newName=name+"."+attrName; stackOperand.Pop(); stackTypes.Pop(); checkAttAccess(newName, sTable); .)
+      /*{ dot IDENT }*/ 
+    ] 
+    [ 
+    bl (. dim1Size = checkArray(sTable, newName); .) EXP (. verifyLimit(sTable, newName, dim1Size); .) br 
+        [ (. dim2Size = checkMatrix(sTable, newName); .) bl EXP (. verifyLimit2(sTable, newName, dim2Size); .)  br ]
+        (. endArray(sTable, newName); .)
+    ] 
 .
 
-VARIABLE_FACT	(. string name; .)
+VARIABLE_FACT	(. string name; string attrName; int dim1Size=0; int dim2Size=0; string newName;.)
 =
-    IDENT	< out name > 
-    [ ( bl EXP br [ bl EXP br ] ) | /*( dot IDENT pl [ EXP { comma EXP } ] pr ) | */( pl [ EXP { comma EXP } ] pr ) ]
+    IF( IsTypedFunctionCall(sTable) )   (. stackOperator.Push(_pl); .) FUNC_CALL (. stackOperator.Pop(); .) |
+    IF( IsMethodCall() ) (. stackOperator.Push(_pl); .) METHOD_CALL (. stackOperator.Pop(); .) |
+    IDENT	< out name >                (. pushToOperandStack(name, sTable);  newName=name;.)
+    [
+      dot IDENT < out attrName >        (. newName=name+"."+attrName; stackOperand.Pop(); stackTypes.Pop(); checkAttAccess(newName, sTable); .)
+      /*{ dot IDENT }*/ 
+    ]
+    [
+    bl (. dim1Size = checkArray(sTable, newName); .) EXP (. verifyLimit(sTable, newName, dim1Size); .) br 
+        [ (. dim2Size = checkMatrix(sTable, newName); .) bl EXP (. verifyLimit2(sTable, newName, dim2Size); .)  br ] 
+        (. endArray(sTable, newName); .)
+    ]
 .
 
 HYPER_EXP=
-    SUPER_EXP { REL_EXP SUPER_EXP }
+    SUPER_EXP { REL_EXP SUPER_EXP (. check(sTable, RELEXP_OPERATORS); .)}
+    (. check(sTable, RELEXP_OPERATORS); .)
 .
 
 BLOCK=
     cbl { STATUTE } cbr
 .
 
-FACT=
-    ( pl EXP pr )                                   |
-    ( [ ( "+" | "-" ) ] ( cte_I | cte_F ) )         |
-    ( ctr_Str )                                     |
-    ( VARIABLE_FACT )                                   
+FACT
+=
+    ( pl (. stackOperator.Push(_pl); .)  HYPER_EXP pr (. stackOperator.Pop(); .) )                                                  |
+    ( [ ( "+" | "-" ) ] ( cte_I  (. pushToOperandStack(createConstInt(Int32.Parse(t.val), sTable), sTable); .) | cte_F (. pushToOperandStack(createConstFloat(float.Parse(t.val), sTable), sTable); .)) )         |
+    ( ctr_Str  (. pushToOperandStack(createConstString(t.val, sTable), sTable); .))                                     |
+    ( ctr_Chr  (. pushToOperandStack(createConstChar(t.val.ToCharArray()[1], sTable), sTable);  .))                          |
+    ( VARIABLE_FACT )
 .
 
 STEP=
-    increment | decrement
+    increment (. stackOperator.Push(_increment); .) | decrement (. stackOperator.Push(_decrement); .)
+.
+
+OPERATORS_TERM =
+    mul       (. stackOperator.Push(_mul); .)      |   div        (. stackOperator.Push(_div); .)   |
+    exponent  (. stackOperator.Push(_exponent); .) |   intdiv    (. stackOperator.Push(_intdiv); .) |
+    module    (. stackOperator.Push(_module); .) 
 .
 
 REL_EXP=
-    "and"   |   "&&"    |
-    "or"    |   "||"
+    "and"   (. stackOperator.Push(_and); .)|   "&&"    (. stackOperator.Push(_and); .)|
+    "or"    (. stackOperator.Push(_or); .)|   "||"    (. stackOperator.Push(_or); .)
 .
 
 SUPER_EXP=
-    EXP [ REL_OP EXP ]
+    EXP     { REL_OP EXP (. check(sTable, RELOP_OPERATORS); .)}
+    (. check(sTable, RELOP_OPERATORS); .)
 .
 
 REL_OP=
-    ( greater | less )  |
-    ( greatereq | lesseq ) |
-    ( equaleq | different )
+    ( greater   (. stackOperator.Push(_greater); .)     | less (. stackOperator.Push(_less); .) )          |
+    ( greatereq (. stackOperator.Push(_greatereq); .)   | lesseq (. stackOperator.Push(_lesseq); .) ) |
+    ( equaleq   (. stackOperator.Push(_equaleq); .)     | different (. stackOperator.Push(_different); .))
 .
 
 IDENT       < out string name >

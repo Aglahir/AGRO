@@ -7,7 +7,6 @@ void test(){
 
 main {
     float g;
-    input(gege);
     b = 15;
     c = 1;
     d = 444;
